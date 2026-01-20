@@ -51,8 +51,9 @@ jobs:
               return 1
             fi
             
-            # 检查标签是否存在
+            # 检查标签是否存在 - GHCR需要正确的Accept头
             RESPONSE=$(curl -fsSL -H "Authorization: Bearer $token" \
+              -H "Accept: application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json" \
               "https://ghcr.io/v2/${{ github.repository_owner }}/anytls-go/manifests/${tag}" 2>/dev/null || echo "")
             
             if [ -n "$RESPONSE" ]; then
@@ -101,9 +102,19 @@ jobs:
             if [ -n "$GHCR_TOKEN" ]; then
               echo "检查 GHCR 是否已存在版本: $MANUAL_VERSION"
               
+              # 调试：先列出所有标签查看
+              echo "调试：获取所有标签列表..."
+              TAG_LIST=$(curl -s -H "Authorization: Bearer $GHCR_TOKEN" \
+                "https://ghcr.io/v2/${{ github.repository_owner }}/anytls-go/tags/list" | \
+                jq -r '.tags[]?' | sort)
+              
+              echo "现有标签："
+              echo "$TAG_LIST"
+              
               # 检查主标签
-              if check_tag_exists "$GHCR_TOKEN" "$MANUAL_VERSION"; then
-                echo "版本 $MANUAL_VERSION 已存在于 GHCR，跳过构建"
+              echo "检查主标签: $MANUAL_VERSION"
+              if echo "$TAG_LIST" | grep -q "^${MANUAL_VERSION}$"; then
+                echo "✓ 版本 $MANUAL_VERSION 已存在于 GHCR，跳过构建"
                 echo "should_build=false" >> $GITHUB_OUTPUT
                 echo "version=$MANUAL_VERSION" >> $GITHUB_OUTPUT
                 echo "version_no_v=${MANUAL_VERSION#v}" >> $GITHUB_OUTPUT
@@ -111,8 +122,9 @@ jobs:
               fi
               
               # 检查server变体标签
-              if check_tag_exists "$GHCR_TOKEN" "${MANUAL_VERSION}-server"; then
-                echo "版本 $MANUAL_VERSION-server 已存在于 GHCR，跳过构建"
+              echo "检查server变体标签: ${MANUAL_VERSION}-server"
+              if echo "$TAG_LIST" | grep -q "^${MANUAL_VERSION}-server$"; then
+                echo "✓ 版本 $MANUAL_VERSION-server 已存在于 GHCR，跳过构建"
                 echo "should_build=false" >> $GITHUB_OUTPUT
                 echo "version=$MANUAL_VERSION" >> $GITHUB_OUTPUT
                 echo "version_no_v=${MANUAL_VERSION#v}" >> $GITHUB_OUTPUT
@@ -154,7 +166,8 @@ jobs:
               "https://ghcr.io/v2/${{ github.repository_owner }}/anytls-go/tags/list" || echo '{"tags":[]}')
             
             # 从标签列表中提取纯版本号标签（格式：vX.Y.Z）
-            GHCR_VERSION=$(echo "$RESPONSE" | jq -r '.tags[]?' | \
+            TAG_LIST=$(echo "$RESPONSE" | jq -r '.tags[]?' | sort)
+            GHCR_VERSION=$(echo "$TAG_LIST" | \
               grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || echo "v0.0.0")
             
             echo "Current GHCR version: $GHCR_VERSION"
@@ -276,7 +289,7 @@ jobs:
           cache-from: type=gha,scope=anytls-${{ matrix.variant }}-versions
           cache-to: type=gha,mode=max,scope=anytls-${{ matrix.variant }}-versions
 
-  create-pure-latest-tags:
+  build-pure-latest:
     needs: [check-version, build-versions]
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
@@ -287,6 +300,9 @@ jobs:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -317,128 +333,44 @@ jobs:
           username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
-      - name: Prepare pure latest tags
-        id: prepare
+      - name: Generate pure latest tags
+        id: pure-latest-meta
         run: |
           VERSION="${{ needs.check-version.outputs.version }}"
           
-          echo "准备创建纯latest标签引用"
-          echo "版本: $VERSION"
+          # 生成纯latest标签（无后缀）
+          GHCR_TAGS="${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest"
           
-          # 定义源标签和目标标签
-          GHCR_SOURCE="${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest-server"
-          GHCR_TARGET="${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest"
-          
-          # 存储变量供后续步骤使用
-          echo "ghcr_source=${GHCR_SOURCE}" >> $GITHUB_OUTPUT
-          echo "ghcr_target=${GHCR_TARGET}" >> $GITHUB_OUTPUT
-          
-          # 检查是否启用了 Docker Hub
+          # 只在 Docker Hub 启用时添加 Docker Hub 标签
           if [ "${{ steps.check-dockerhub.outputs.dockerhub_enabled }}" = "true" ]; then
-            DOCKER_SOURCE="${{ env.REGISTRY_DOCKER }}/${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest-server"
-            DOCKER_TARGET="${{ env.REGISTRY_DOCKER }}/${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest"
-            echo "docker_source=${DOCKER_SOURCE}" >> $GITHUB_OUTPUT
-            echo "docker_target=${DOCKER_TARGET}" >> $GITHUB_OUTPUT
-            echo "Docker Hub 已启用"
+            DOCKER_TAGS="${{ env.REGISTRY_DOCKER }}/${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest"
+            echo "tags=${GHCR_TAGS},${DOCKER_TAGS}" >> $GITHUB_OUTPUT
           else
-            echo "Docker Hub 未启用"
+            echo "tags=${GHCR_TAGS}" >> $GITHUB_OUTPUT
           fi
+          
+          echo "纯latest标签生成完成"
 
-      - name: Create GHCR pure latest tag
+      - name: Debug version info
         run: |
-          SOURCE="${{ steps.prepare.outputs.ghcr_source }}"
-          TARGET="${{ steps.prepare.outputs.ghcr_target }}"
-          
-          echo "创建 GHCR 纯latest标签"
-          echo "源: $SOURCE"
-          echo "目标: $TARGET"
-          
-          # 检查源标签是否存在
-          echo "检查源标签是否存在..."
-          docker buildx imagetools inspect "$SOURCE" >/dev/null 2>&1
-          if [ $? -eq 0 ]; then
-            echo "源标签存在，创建纯latest标签引用..."
-            docker buildx imagetools create -t "$TARGET" "$SOURCE"
-            
-            # 验证创建是否成功
-            docker buildx imagetools inspect "$TARGET" >/dev/null 2>&1
-            if [ $? -eq 0 ]; then
-              echo "✓ 成功创建 GHCR 纯latest标签: $TARGET"
-            else
-              echo "✗ 创建 GHCR 纯latest标签失败"
-            fi
-          else
-            echo "✗ 源标签不存在: $SOURCE"
-            echo "将使用版本号标签作为源..."
-            
-            # 尝试使用版本号标签作为源
-            VERSION="${{ needs.check-version.outputs.version }}"
-            VERSION_SOURCE="${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${VERSION}"
-            
-            echo "尝试使用版本号标签: $VERSION_SOURCE"
-            docker buildx imagetools inspect "$VERSION_SOURCE" >/dev/null 2>&1
-            if [ $? -eq 0 ]; then
-              docker buildx imagetools create -t "$TARGET" "$VERSION_SOURCE"
-              echo "✓ 使用版本号标签创建 GHCR 纯latest标签: $TARGET"
-            else
-              echo "✗ 版本号标签也不存在，无法创建纯latest标签"
-            fi
-          fi
+          echo "Version: ${{ needs.check-version.outputs.version }}"
+          echo "Version without v: ${{ needs.check-version.outputs.version_no_v }}"
 
-      - name: Create Docker Hub pure latest tag
-        if: steps.check-dockerhub.outputs.dockerhub_enabled == 'true'
-        run: |
-          SOURCE="${{ steps.prepare.outputs.docker_source }}"
-          TARGET="${{ steps.prepare.outputs.docker_target }}"
-          
-          echo "创建 Docker Hub 纯latest标签"
-          echo "源: $SOURCE"
-          echo "目标: $TARGET"
-          
-          # 检查源标签是否存在
-          echo "检查源标签是否存在..."
-          docker buildx imagetools inspect "$SOURCE" >/dev/null 2>&1
-          if [ $? -eq 0 ]; then
-            echo "源标签存在，创建纯latest标签引用..."
-            docker buildx imagetools create -t "$TARGET" "$SOURCE"
-            
-            # 验证创建是否成功
-            docker buildx imagetools inspect "$TARGET" >/dev/null 2>&1
-            if [ $? -eq 0 ]; then
-              echo "✓ 成功创建 Docker Hub 纯latest标签: $TARGET"
-            else
-              echo "✗ 创建 Docker Hub 纯latest标签失败"
-            fi
-          else
-            echo "✗ 源标签不存在: $SOURCE"
-            echo "将尝试其他源标签..."
-            
-            # 尝试使用版本号标签作为源
-            VERSION="${{ needs.check-version.outputs.version }}"
-            VERSION_SOURCE="${{ env.REGISTRY_DOCKER }}/${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${VERSION}"
-            
-            echo "尝试使用版本号标签: $VERSION_SOURCE"
-            docker buildx imagetools inspect "$VERSION_SOURCE" >/dev/null 2>&1
-            if [ $? -eq 0 ]; then
-              docker buildx imagetools create -t "$TARGET" "$VERSION_SOURCE"
-              echo "✓ 使用版本号标签创建 Docker Hub 纯latest标签: $TARGET"
-            else
-              echo "✗ 版本号标签也不存在，尝试使用 GHCR 标签..."
-              
-              # 最后尝试使用 GHCR 的标签
-              GHCR_SOURCE="${{ steps.prepare.outputs.ghcr_source }}"
-              docker buildx imagetools inspect "$GHCR_SOURCE" >/dev/null 2>&1
-              if [ $? -eq 0 ]; then
-                docker buildx imagetools create -t "$TARGET" "$GHCR_SOURCE"
-                echo "✓ 使用 GHCR 标签创建 Docker Hub 纯latest标签: $TARGET"
-              else
-                echo "✗ 所有源标签都不存在，无法创建 Docker Hub 纯latest标签"
-              fi
-            fi
-          fi
+      - name: Build and push pure latest tag
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.server  # 使用server变体作为纯latest的基础
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.pure-latest-meta.outputs.tags }}
+          build-args: |
+            VERSION=${{ needs.check-version.outputs.version_no_v }}
+          cache-from: type=gha,scope=anytls-pure-latest
+          cache-to: type=gha,mode=max,scope=anytls-pure-latest
 
   verify:
-    needs: [check-version, build-versions, create-pure-latest-tags]
+    needs: [check-version, build-versions, build-pure-latest]
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     env:
