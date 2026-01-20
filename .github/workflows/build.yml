@@ -85,7 +85,7 @@ jobs:
             echo "should_build=false" >> $GITHUB_OUTPUT
           fi
 
-  build:
+  build-versions:
     needs: check-version
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
@@ -119,18 +119,19 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Generate tags
+      - name: Generate version tags
         id: meta
         run: |
           VERSION="${{ needs.check-version.outputs.version }}"
           VARIANT="${{ matrix.variant }}"
           
+          # 只生成版本号标签，不带latest标签
           if [ "$VARIANT" = "server" ]; then
-            GHCR_TAGS="${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${VERSION},${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest,${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${VERSION}-server,${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest-server"
-            DOCKER_TAGS="${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${VERSION},${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest,${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${VERSION}-server,${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest-server"
+            GHCR_TAGS="${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${VERSION},${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${VERSION}-server"
+            DOCKER_TAGS="${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${VERSION},${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${VERSION}-server"
           else
-            GHCR_TAGS="${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${VERSION}-client,${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest-client"
-            DOCKER_TAGS="${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${VERSION}-client,${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest-client"
+            GHCR_TAGS="${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${VERSION}-client"
+            DOCKER_TAGS="${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${VERSION}-client"
           fi
           
           echo "tags=${GHCR_TAGS},${DOCKER_TAGS}" >> $GITHUB_OUTPUT
@@ -140,7 +141,7 @@ jobs:
           echo "Version: ${{ needs.check-version.outputs.version }}"
           echo "Version without v: ${{ needs.check-version.outputs.version_no_v }}"
 
-      - name: Build and push
+      - name: Build and push version tags
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -150,5 +151,172 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           build-args: |
             VERSION=${{ needs.check-version.outputs.version_no_v }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=anytls-${{ matrix.variant }}-version
+          cache-to: type=gha,mode=max,scope=anytls-${{ matrix.variant }}-version
+
+  build-pure-latest:
+    needs: [check-version, build-versions]
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_GHCR }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_DOCKER }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Generate pure latest tags
+        id: pure-latest-meta
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          
+          # 生成纯latest标签（只有latest标签）
+          GHCR_TAGS="${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest,${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest-server"
+          DOCKER_TAGS="${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest,${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest-server"
+          
+          echo "tags=${GHCR_TAGS},${DOCKER_TAGS}" >> $GITHUB_OUTPUT
+
+      - name: Build and push pure latest tags
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.server  # 使用server变体作为纯latest的基础
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.pure-latest-meta.outputs.tags }}
+          build-args: |
+            VERSION=${{ needs.check-version.outputs.version_no_v }}
+          cache-from: type=gha,scope=anytls-pure-latest
+          cache-to: type=gha,mode=max,scope=anytls-pure-latest
+
+  verify:
+    needs: [check-version, build-versions, build-pure-latest]
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_GHCR }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_DOCKER }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Verify images
+        run: |
+          /bin/bash << 'EOF'
+          VERSION="${{ needs.check-version.outputs.version }}"
+          GHCR_BASE="${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}"
+          DOCKER_BASE="${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
+          
+          echo "=== AnyTLS 镜像验证 ==="
+          echo ""
+          
+          # 检查 GHCR 镜像
+          echo "1. 验证 GHCR 镜像:"
+          
+          echo "   a) 纯latest标签: ${GHCR_BASE}:latest"
+          docker manifest inspect "${GHCR_BASE}:latest" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo "   b) 版本号标签: ${GHCR_BASE}:${VERSION}"
+          docker manifest inspect "${GHCR_BASE}:${VERSION}" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo "   c) server变体: ${GHCR_BASE}:${VERSION}-server"
+          docker manifest inspect "${GHCR_BASE}:${VERSION}-server" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo "   d) client变体: ${GHCR_BASE}:${VERSION}-client"
+          docker manifest inspect "${GHCR_BASE}:${VERSION}-client" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo "   e) latest-server标签: ${GHCR_BASE}:latest-server"
+          docker manifest inspect "${GHCR_BASE}:latest-server" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo ""
+          
+          # 检查 Docker Hub 镜像
+          echo "2. 验证 Docker Hub 镜像:"
+          
+          echo "   a) 纯latest标签: ${DOCKER_BASE}:latest"
+          docker manifest inspect "${DOCKER_BASE}:latest" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo "   b) 版本号标签: ${DOCKER_BASE}:${VERSION}"
+          docker manifest inspect "${DOCKER_BASE}:${VERSION}" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo "   c) server变体: ${DOCKER_BASE}:${VERSION}-server"
+          docker manifest inspect "${DOCKER_BASE}:${VERSION}-server" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo "   d) client变体: ${DOCKER_BASE}:${VERSION}-client"
+          docker manifest inspect "${DOCKER_BASE}:${VERSION}-client" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo "   e) latest-server标签: ${DOCKER_BASE}:latest-server"
+          docker manifest inspect "${DOCKER_BASE}:latest-server" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo ""
+          
+          # 测试拉取镜像
+          echo "3. 测试拉取关键镜像:"
+          echo "   拉取 GHCR latest..."
+          docker pull "${GHCR_BASE}:latest" --quiet 2>/dev/null && echo "   ✓ 成功" || echo "   ✗ 失败"
+          
+          echo "   拉取 GHCR 版本号标签..."
+          docker pull "${GHCR_BASE}:${VERSION}" --quiet 2>/dev/null && echo "   ✓ 成功" || echo "   ✗ 失败"
+          
+          echo ""
+          
+          # 显示镜像信息
+          echo "4. 镜像信息:"
+          echo "   架构支持: linux/amd64, linux/arm64"
+          echo ""
+          
+          # 使用示例
+          echo "5. 使用示例:"
+          echo "   GHCR 纯latest标签 (server):"
+          echo "   docker run -d --name anytls-server ${GHCR_BASE}:latest"
+          echo ""
+          echo "   GHCR 版本号标签 (server):"
+          echo "   docker run -d --name anytls-server ${GHCR_BASE}:${VERSION}"
+          echo ""
+          echo "   GHCR server变体:"
+          echo "   docker run -d --name anytls-server ${GHCR_BASE}:${VERSION}-server"
+          echo ""
+          echo "   GHCR client变体:"
+          echo "   docker run -d --name anytls-client ${GHCR_BASE}:${VERSION}-client"
+          echo ""
+          
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
+            echo "   Docker Hub 纯latest标签 (server):"
+            echo "   docker run -d --name anytls-server ${DOCKER_BASE}:latest"
+            echo ""
+            echo "   Docker Hub 版本号标签 (server):"
+            echo "   docker run -d --name anytls-server ${DOCKER_BASE}:${VERSION}"
+          fi
+          
+          echo ""
+          echo "=== 验证完成 ==="
+          echo "所有镜像均已成功构建和推送"
+          EOF
