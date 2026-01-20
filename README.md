@@ -1,3 +1,8 @@
+# Shadowsocks-rust Docker
+
+基于官方 [anytls-go](https://github.com/anytls/anytls-go) 的 Docker 镜像，支持多架构、多变体自动构建。
+
+
 ## 快速开始
 
 ### Server
