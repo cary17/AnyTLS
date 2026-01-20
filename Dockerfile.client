@@ -10,14 +10,25 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then ARCH="amd64"; else ARCH="arm64"; fi && 
     echo "=== Build Information ===" && \
     echo "TARGETARCH: $TARGETARCH" && \
     echo "ARCH: ${ARCH}" && \
-    echo "VERSION: ${VERSION}" && \
-    echo "VERSION length: ${#VERSION}" && \
-    if [ -z "$VERSION" ]; then echo "ERROR: VERSION is empty!"; exit 1; fi && \
+    echo "VERSION: '${VERSION}'" && \
+    if [ -z "$VERSION" ]; then \
+      echo "ERROR: VERSION build arg is empty or not set!"; \
+      exit 1; \
+    fi && \
     URL="https://github.com/anytls/anytls-go/releases/download/v${VERSION}/anytls_${VERSION}_linux_${ARCH}.zip" && \
-    echo "Full URL: ${URL}" && \
+    echo "Download URL: ${URL}" && \
     echo "=======================" && \
-    curl -fSL -o /tmp/anytls.zip "${URL}" && \
+    if ! curl -fSL -o /tmp/anytls.zip "${URL}"; then \
+      echo "ERROR: Failed to download from ${URL}"; \
+      echo "Please check if version v${VERSION} exists at https://github.com/anytls/anytls-go/releases"; \
+      exit 1; \
+    fi && \
     unzip /tmp/anytls.zip -d /tmp && \
+    if [ ! -f /tmp/anytls-client ]; then \
+      echo "ERROR: anytls-client binary not found in archive"; \
+      ls -la /tmp/; \
+      exit 1; \
+    fi && \
     chmod +x /tmp/anytls-client && \
     rm /tmp/anytls.zip
 
@@ -38,5 +49,6 @@ ENV LISTEN_ADDR=127.0.0.1:1080
 ENV SERVER_URI=""
 ENV SERVER_ADDR=""
 ENV PASSWORD=""
+
 
 ENTRYPOINT ["/entrypoint.sh"]
