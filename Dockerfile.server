@@ -6,7 +6,7 @@ ARG TARGETARCH
 RUN apt-get update && apt-get install -y curl unzip ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-RUN ARCH=$([ "$TARGETARCH" = "amd64" ] && echo "amd64" || echo "arm64") && \
+RUN if [ "$TARGETARCH" = "amd64" ]; then ARCH="amd64"; else ARCH="arm64"; fi && \
     curl -L -o /tmp/anytls.zip \
     "https://github.com/anytls/anytls-go/releases/download/v${VERSION}/anytls_${VERSION}_linux_${ARCH}.zip" && \
     unzip /tmp/anytls.zip -d /tmp && \
@@ -28,7 +28,5 @@ USER anytls
 
 ENV LISTEN_ADDR=0.0.0.0:8443
 ENV PASSWORD=""
-
-EXPOSE 8443
 
 ENTRYPOINT ["/entrypoint.sh"]
