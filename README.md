@@ -15,12 +15,12 @@
 
 ### Server
 ```bash
-docker run -d -p 8443:8443 -e PASSWORD=your_password ghcr.io/your-username/anytls-go:latest
+docker run -d -p 8443:8443 -e PASSWORD=your_password ghcr.io/cary17/anytls-go:latest
 ```
 
 ### Client
 ```bash
-docker run -d -p 1080:1080 -e SERVER_URI=anytls://password@host:port ghcr.io/your-username/anytls-go:latest-client
+docker run -d -p 1080:1080 -e SERVER_URI=anytls://password@host:port ghcr.io/cary17/anytls-go:latest-client
 ```
 
 ## 环境变量
