@@ -28,7 +28,7 @@ jobs:
       version: ${{ steps.check.outputs.version }}
       version_no_v: ${{ steps.check.outputs.version_no_v }}
     steps:
-      - name: Check latest version
+      - name: Check version availability
         id: check
         env:
           GH_TOKEN: ${{ secrets.ACTIONS_TOKEN }}
@@ -37,6 +37,32 @@ jobs:
           FORCE_BUILD="${{ github.event.inputs.force_build }}"
           MANUAL_VERSION="${{ github.event.inputs.version }}"
           
+          # 通用函数：获取 GHCR token
+          get_ghcr_token() {
+            curl -fsSL "https://ghcr.io/token?scope=repository:${{ github.repository_owner }}/anytls-go:pull" | jq -r '.token // empty'
+          }
+          
+          # 通用函数：检查标签是否存在
+          check_tag_exists() {
+            local token=$1
+            local tag=$2
+            
+            if [ -z "$token" ]; then
+              return 1
+            fi
+            
+            # 检查标签是否存在
+            RESPONSE=$(curl -fsSL -H "Authorization: Bearer $token" \
+              "https://ghcr.io/v2/${{ github.repository_owner }}/anytls-go/manifests/${tag}" 2>/dev/null || echo "")
+            
+            if [ -n "$RESPONSE" ]; then
+              return 0  # 存在
+            else
+              return 1  # 不存在
+            fi
+          }
+          
+          # 如果强制构建，则直接使用指定版本或最新版本
           if [ "$FORCE_BUILD" = "true" ]; then
             echo "Force build enabled"
             if [ -n "$MANUAL_VERSION" ]; then
@@ -55,6 +81,13 @@ jobs:
             exit 0
           fi
           
+          # 获取 GHCR token
+          GHCR_TOKEN=$(get_ghcr_token)
+          if [ -z "$GHCR_TOKEN" ]; then
+            echo "警告：无法获取 GHCR token，将假定需要构建"
+          fi
+          
+          # 如果有手动指定的版本
           if [ -n "$MANUAL_VERSION" ]; then
             echo "Manual version specified: $MANUAL_VERSION"
             
@@ -64,73 +97,86 @@ jobs:
               MANUAL_VERSION="v$MANUAL_VERSION"
             fi
             
-            # 检查 GHCR 是否已存在该版本
-            echo "检查 GHCR 是否已存在版本: $MANUAL_VERSION"
-            
-            # 获取 GHCR token
-            TOKEN=$(curl -fsSL "https://ghcr.io/token?scope=repository:${{ github.repository_owner }}/anytls-go:pull" | jq -r '.token // empty')
-            
-            if [ -n "$TOKEN" ]; then
-              # 检查标签是否存在
-              echo "查询 GHCR 标签列表..."
-              RESPONSE=$(curl -fsSL -H "Authorization: Bearer $TOKEN" \
-                "https://ghcr.io/v2/${{ github.repository_owner }}/anytls-go/tags/list" || echo '{"tags":[]}')
+            # 检查是否已存在该版本（主标签）
+            if [ -n "$GHCR_TOKEN" ]; then
+              echo "检查 GHCR 是否已存在版本: $MANUAL_VERSION"
               
-              # 检查是否包含该版本标签
-              TAG_EXISTS=$(echo "$RESPONSE" | jq -r '.tags[]?' | grep -q "^${MANUAL_VERSION}$" && echo "true" || echo "false")
-              
-              if [ "$TAG_EXISTS" = "true" ]; then
+              # 检查主标签
+              if check_tag_exists "$GHCR_TOKEN" "$MANUAL_VERSION"; then
                 echo "版本 $MANUAL_VERSION 已存在于 GHCR，跳过构建"
                 echo "should_build=false" >> $GITHUB_OUTPUT
                 echo "version=$MANUAL_VERSION" >> $GITHUB_OUTPUT
                 echo "version_no_v=${MANUAL_VERSION#v}" >> $GITHUB_OUTPUT
-              else
-                echo "版本 $MANUAL_VERSION 不存在于 GHCR，需要构建"
-                VERSION_NO_V="${MANUAL_VERSION#v}"
-                echo "should_build=true" >> $GITHUB_OUTPUT
-                echo "version=$MANUAL_VERSION" >> $GITHUB_OUTPUT
-                echo "version_no_v=$VERSION_NO_V" >> $GITHUB_OUTPUT
+                exit 0
               fi
+              
+              # 检查server变体标签
+              if check_tag_exists "$GHCR_TOKEN" "${MANUAL_VERSION}-server"; then
+                echo "版本 $MANUAL_VERSION-server 已存在于 GHCR，跳过构建"
+                echo "should_build=false" >> $GITHUB_OUTPUT
+                echo "version=$MANUAL_VERSION" >> $GITHUB_OUTPUT
+                echo "version_no_v=${MANUAL_VERSION#v}" >> $GITHUB_OUTPUT
+                exit 0
+              fi
+              
+              echo "版本 $MANUAL_VERSION 不存在于 GHCR，需要构建"
             else
-              echo "无法获取 GHCR token，假定需要构建"
-              VERSION_NO_V="${MANUAL_VERSION#v}"
-              echo "should_build=true" >> $GITHUB_OUTPUT
-              echo "version=$MANUAL_VERSION" >> $GITHUB_OUTPUT
-              echo "version_no_v=$VERSION_NO_V" >> $GITHUB_OUTPUT
+              echo "无法检查 GHCR，假定需要构建"
             fi
+            
+            VERSION_NO_V="${MANUAL_VERSION#v}"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "version=$MANUAL_VERSION" >> $GITHUB_OUTPUT
+            echo "version_no_v=$VERSION_NO_V" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          # 自动检测版本逻辑
-          LATEST_VERSION=$(curl -s -H "Authorization: token $GH_TOKEN" \
+          # 自动检测版本逻辑：比较上游最新版本和GHCR已有版本
+          echo "开始自动版本检测..."
+          
+          # 获取上游最新版本
+          UPSTREAM_LATEST=$(curl -s -H "Authorization: token $GH_TOKEN" \
             https://api.github.com/repos/anytls/anytls-go/releases/latest | \
-            jq -r .tag_name)
-          echo "Latest upstream version: $LATEST_VERSION"
+            jq -r .tag_name || echo "")
           
-          # 获取 GHCR token 并检查现有版本
-          TOKEN=$(curl -fsSL "https://ghcr.io/token?scope=repository:${{ github.repository_owner }}/anytls-go:pull" | jq -r '.token // empty')
+          if [ -z "$UPSTREAM_LATEST" ]; then
+            echo "无法获取上游最新版本"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           
-          if [ -n "$TOKEN" ]; then
-            GHCR_VERSION=$(curl -fsSL -H "Authorization: Bearer $TOKEN" \
-              "https://ghcr.io/v2/${{ github.repository_owner }}/anytls-go/tags/list" | \
-              jq -r '.tags[]?' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || echo "v0.0.0")
+          echo "Latest upstream version: $UPSTREAM_LATEST"
+          
+          # 获取GHCR中已存在的版本号
+          if [ -n "$GHCR_TOKEN" ]; then
+            # 获取所有标签并筛选出版本号标签
+            RESPONSE=$(curl -fsSL -H "Authorization: Bearer $GHCR_TOKEN" \
+              "https://ghcr.io/v2/${{ github.repository_owner }}/anytls-go/tags/list" || echo '{"tags":[]}')
+            
+            # 从标签列表中提取纯版本号标签（格式：vX.Y.Z）
+            GHCR_VERSION=$(echo "$RESPONSE" | jq -r '.tags[]?' | \
+              grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || echo "v0.0.0")
+            
             echo "Current GHCR version: $GHCR_VERSION"
             
-            if [ "$(printf '%s\n' "$LATEST_VERSION" "$GHCR_VERSION" | sort -V | tail -1)" = "$LATEST_VERSION" ] && [ "$LATEST_VERSION" != "$GHCR_VERSION" ]; then
+            # 比较版本号
+            if [ "$(printf '%s\n' "$UPSTREAM_LATEST" "$GHCR_VERSION" | sort -V | tail -1)" = "$UPSTREAM_LATEST" ] && \
+               [ "$UPSTREAM_LATEST" != "$GHCR_VERSION" ]; then
               echo "New version available, building..."
-              VERSION_NO_V="${LATEST_VERSION#v}"
+              VERSION_NO_V="${UPSTREAM_LATEST#v}"
               echo "should_build=true" >> $GITHUB_OUTPUT
-              echo "version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+              echo "version=$UPSTREAM_LATEST" >> $GITHUB_OUTPUT
               echo "version_no_v=$VERSION_NO_V" >> $GITHUB_OUTPUT
             else
               echo "Already up to date"
               echo "should_build=false" >> $GITHUB_OUTPUT
             fi
           else
-            echo "无法获取 GHCR token，假定需要构建"
-            VERSION_NO_V="${LATEST_VERSION#v}"
+            # 无法获取GHCR token，保守起见构建最新版本
+            echo "无法检查GHCR状态，构建最新版本: $UPSTREAM_LATEST"
+            VERSION_NO_V="${UPSTREAM_LATEST#v}"
             echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+            echo "version=$UPSTREAM_LATEST" >> $GITHUB_OUTPUT
             echo "version_no_v=$VERSION_NO_V" >> $GITHUB_OUTPUT
           fi
 
@@ -161,7 +207,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check Docker Hub credentials
+        id: check-dockerhub
+        run: |
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "dockerhub_enabled=true" >> $GITHUB_OUTPUT
+          else
+            echo "dockerhub_enabled=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Log in to Docker Hub
+        if: steps.check-dockerhub.outputs.dockerhub_enabled == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY_DOCKER }}
@@ -177,13 +233,30 @@ jobs:
           # 生成版本号标签和带变体的latest标签
           if [ "$VARIANT" = "server" ]; then
             GHCR_TAGS="${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${VERSION},${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${VERSION}-server,${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest-server"
-            DOCKER_TAGS="${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${VERSION},${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${VERSION}-server,${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest-server"
+            
+            # 只在 Docker Hub 启用时添加 Docker Hub 标签
+            if [ "${{ steps.check-dockerhub.outputs.dockerhub_enabled }}" = "true" ]; then
+              DOCKER_TAGS="${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${VERSION},${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${VERSION}-server,${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest-server"
+            else
+              DOCKER_TAGS=""
+            fi
           else
             GHCR_TAGS="${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${VERSION}-client,${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest-client"
-            DOCKER_TAGS="${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${VERSION}-client,${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest-client"
+            
+            # 只在 Docker Hub 启用时添加 Docker Hub 标签
+            if [ "${{ steps.check-dockerhub.outputs.dockerhub_enabled }}" = "true" ]; then
+              DOCKER_TAGS="${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${VERSION}-client,${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest-client"
+            else
+              DOCKER_TAGS=""
+            fi
           fi
           
-          echo "tags=${GHCR_TAGS},${DOCKER_TAGS}" >> $GITHUB_OUTPUT
+          # 构建完整的 tags 字符串
+          if [ -n "$DOCKER_TAGS" ]; then
+            echo "tags=${GHCR_TAGS},${DOCKER_TAGS}" >> $GITHUB_OUTPUT
+          else
+            echo "tags=${GHCR_TAGS}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Debug version info
         run: |
