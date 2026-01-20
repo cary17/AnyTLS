@@ -154,17 +154,17 @@ jobs:
           cache-from: type=gha,scope=anytls-${{ matrix.variant }}-versions
           cache-to: type=gha,mode=max,scope=anytls-${{ matrix.variant }}-versions
 
-  create-pure-latest-tags:
+  build-pure-latest:
     needs: [check-version, build-versions]
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    env:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -178,150 +178,39 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check Docker Hub credentials
-        id: check-dockerhub
-        run: |
-          if [ -n "${{ env.DOCKERHUB_USERNAME }}" ] && [ -n "${{ env.DOCKERHUB_TOKEN }}" ]; then
-            echo "dockerhub_enabled=true" >> $GITHUB_OUTPUT
-          else
-            echo "dockerhub_enabled=false" >> $GITHUB_OUTPUT
-          fi
-
       - name: Log in to Docker Hub
-        if: steps.check-dockerhub.outputs.dockerhub_enabled == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY_DOCKER }}
-          username: ${{ env.DOCKERHUB_USERNAME }}
-          password: ${{ env.DOCKERHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Prepare pure latest tags
-        id: prepare
+      - name: Generate pure latest tags
+        id: pure-latest-meta
         run: |
-          VERSION="${{ needs.check-version.outputs.version }}"
+          # 只生成纯latest标签（无后缀）
+          GHCR_TAGS="${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest"
+          DOCKER_TAGS="${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest"
           
-          echo "准备创建纯latest标签引用"
-          echo "版本: $VERSION"
-          
-          # 定义源标签和目标标签
-          GHCR_SOURCE="${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest-server"
-          GHCR_TARGET="${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest"
-          
-          # 存储变量供后续步骤使用
-          echo "ghcr_source=${GHCR_SOURCE}" >> $GITHUB_OUTPUT
-          echo "ghcr_target=${GHCR_TARGET}" >> $GITHUB_OUTPUT
-          
-          # 检查是否启用了 Docker Hub
-          if [ "${{ steps.check-dockerhub.outputs.dockerhub_enabled }}" = "true" ]; then
-            DOCKER_SOURCE="${{ env.REGISTRY_DOCKER }}/${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest-server"
-            DOCKER_TARGET="${{ env.REGISTRY_DOCKER }}/${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest"
-            echo "docker_source=${DOCKER_SOURCE}" >> $GITHUB_OUTPUT
-            echo "docker_target=${DOCKER_TARGET}" >> $GITHUB_OUTPUT
-            echo "Docker Hub 已启用"
-          else
-            echo "Docker Hub 未启用"
-          fi
+          echo "tags=${GHCR_TAGS},${DOCKER_TAGS}" >> $GITHUB_OUTPUT
 
-      - name: Create GHCR pure latest tag
-        run: |
-          SOURCE="${{ steps.prepare.outputs.ghcr_source }}"
-          TARGET="${{ steps.prepare.outputs.ghcr_target }}"
-          
-          echo "创建 GHCR 纯latest标签"
-          echo "源: $SOURCE"
-          echo "目标: $TARGET"
-          
-          # 检查源标签是否存在
-          echo "检查源标签是否存在..."
-          docker buildx imagetools inspect "$SOURCE" >/dev/null 2>&1
-          if [ $? -eq 0 ]; then
-            echo "源标签存在，创建纯latest标签引用..."
-            docker buildx imagetools create -t "$TARGET" "$SOURCE"
-            
-            # 验证创建是否成功
-            docker buildx imagetools inspect "$TARGET" >/dev/null 2>&1
-            if [ $? -eq 0 ]; then
-              echo "✓ 成功创建 GHCR 纯latest标签: $TARGET"
-            else
-              echo "✗ 创建 GHCR 纯latest标签失败"
-            fi
-          else
-            echo "✗ 源标签不存在: $SOURCE"
-            echo "将使用版本号标签作为源..."
-            
-            # 尝试使用版本号标签作为源
-            VERSION="${{ needs.check-version.outputs.version }}"
-            VERSION_SOURCE="${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${VERSION}"
-            
-            echo "尝试使用版本号标签: $VERSION_SOURCE"
-            docker buildx imagetools inspect "$VERSION_SOURCE" >/dev/null 2>&1
-            if [ $? -eq 0 ]; then
-              docker buildx imagetools create -t "$TARGET" "$VERSION_SOURCE"
-              echo "✓ 使用版本号标签创建 GHCR 纯latest标签: $TARGET"
-            else
-              echo "✗ 版本号标签也不存在，无法创建纯latest标签"
-            fi
-          fi
-
-      - name: Create Docker Hub pure latest tag
-        if: steps.check-dockerhub.outputs.dockerhub_enabled == 'true'
-        run: |
-          SOURCE="${{ steps.prepare.outputs.docker_source }}"
-          TARGET="${{ steps.prepare.outputs.docker_target }}"
-          
-          echo "创建 Docker Hub 纯latest标签"
-          echo "源: $SOURCE"
-          echo "目标: $TARGET"
-          
-          # 检查源标签是否存在
-          echo "检查源标签是否存在..."
-          docker buildx imagetools inspect "$SOURCE" >/dev/null 2>&1
-          if [ $? -eq 0 ]; then
-            echo "源标签存在，创建纯latest标签引用..."
-            docker buildx imagetools create -t "$TARGET" "$SOURCE"
-            
-            # 验证创建是否成功
-            docker buildx imagetools inspect "$TARGET" >/dev/null 2>&1
-            if [ $? -eq 0 ]; then
-              echo "✓ 成功创建 Docker Hub 纯latest标签: $TARGET"
-            else
-              echo "✗ 创建 Docker Hub 纯latest标签失败"
-            fi
-          else
-            echo "✗ 源标签不存在: $SOURCE"
-            echo "将尝试其他源标签..."
-            
-            # 尝试使用版本号标签作为源
-            VERSION="${{ needs.check-version.outputs.version }}"
-            VERSION_SOURCE="${{ env.REGISTRY_DOCKER }}/${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${VERSION}"
-            
-            echo "尝试使用版本号标签: $VERSION_SOURCE"
-            docker buildx imagetools inspect "$VERSION_SOURCE" >/dev/null 2>&1
-            if [ $? -eq 0 ]; then
-              docker buildx imagetools create -t "$TARGET" "$VERSION_SOURCE"
-              echo "✓ 使用版本号标签创建 Docker Hub 纯latest标签: $TARGET"
-            else
-              echo "✗ 版本号标签也不存在，尝试使用 GHCR 标签..."
-              
-              # 最后尝试使用 GHCR 的标签
-              GHCR_SOURCE="${{ steps.prepare.outputs.ghcr_source }}"
-              docker buildx imagetools inspect "$GHCR_SOURCE" >/dev/null 2>&1
-              if [ $? -eq 0 ]; then
-                docker buildx imagetools create -t "$TARGET" "$GHCR_SOURCE"
-                echo "✓ 使用 GHCR 标签创建 Docker Hub 纯latest标签: $TARGET"
-              else
-                echo "✗ 所有源标签都不存在，无法创建 Docker Hub 纯latest标签"
-              fi
-            fi
-          fi
+      - name: Build and push pure latest tag
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.server  # 使用server变体作为纯latest的基础
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.pure-latest-meta.outputs.tags }}
+          build-args: |
+            VERSION=${{ needs.check-version.outputs.version_no_v }}
+          cache-from: type=gha,scope=anytls-pure-latest
+          cache-to: type=gha,mode=max,scope=anytls-pure-latest
 
   verify:
-    needs: [check-version, build-versions, create-pure-latest-tags]
+    needs: [check-version, build-versions, build-pure-latest]
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
-    env:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -330,28 +219,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check Docker Hub credentials
-        id: verify-check-dockerhub
-        run: |
-          if [ -n "${{ env.DOCKERHUB_USERNAME }}" ] && [ -n "${{ env.DOCKERHUB_TOKEN }}" ]; then
-            echo "dockerhub_enabled=true" >> $GITHUB_OUTPUT
-          else
-            echo "dockerhub_enabled=false" >> $GITHUB_OUTPUT
-          fi
-
       - name: Log in to Docker Hub
-        if: steps.verify-check-dockerhub.outputs.dockerhub_enabled == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY_DOCKER }}
-          username: ${{ env.DOCKERHUB_USERNAME }}
-          password: ${{ env.DOCKERHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Verify images
         run: |
           /bin/bash << 'EOF'
           VERSION="${{ needs.check-version.outputs.version }}"
           GHCR_BASE="${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}"
+          DOCKER_BASE="${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
           
           echo "=== AnyTLS 镜像验证 ==="
           echo ""
@@ -359,65 +239,62 @@ jobs:
           # 检查 GHCR 镜像
           echo "1. 验证 GHCR 镜像:"
           
-          TAGS=(
-            "纯latest标签 (无后缀): ${GHCR_BASE}:latest"
-            "版本号标签 (无后缀): ${GHCR_BASE}:${VERSION}"
-            "版本号server变体: ${GHCR_BASE}:${VERSION}-server"
-            "版本号client变体: ${GHCR_BASE}:${VERSION}-client"
-            "latest-server标签: ${GHCR_BASE}:latest-server"
-            "latest-client标签: ${GHCR_BASE}:latest-client"
-          )
+          echo "   a) 纯latest标签 (无后缀): ${GHCR_BASE}:latest"
+          docker manifest inspect "${GHCR_BASE}:latest" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
           
-          for TAG_INFO in "${TAGS[@]}"; do
-            DESCRIPTION="${TAG_INFO%:*}"
-            TAG="${TAG_INFO#*: }"
-            echo -n "   ${DESCRIPTION}: "
-            docker buildx imagetools inspect "$TAG" >/dev/null 2>&1 && echo "✓ 存在" || echo "✗ 不存在"
-          done
+          echo "   b) 版本号标签 (无后缀): ${GHCR_BASE}:${VERSION}"
+          docker manifest inspect "${GHCR_BASE}:${VERSION}" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo "   c) 版本号server变体: ${GHCR_BASE}:${VERSION}-server"
+          docker manifest inspect "${GHCR_BASE}:${VERSION}-server" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo "   d) 版本号client变体: ${GHCR_BASE}:${VERSION}-client"
+          docker manifest inspect "${GHCR_BASE}:${VERSION}-client" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo "   e) latest-server标签: ${GHCR_BASE}:latest-server"
+          docker manifest inspect "${GHCR_BASE}:latest-server" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo "   f) latest-client标签: ${GHCR_BASE}:latest-client"
+          docker manifest inspect "${GHCR_BASE}:latest-client" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
           
           echo ""
           
           # 检查 Docker Hub 镜像
-          if [ "${{ steps.verify-check-dockerhub.outputs.dockerhub_enabled }}" = "true" ]; then
-            DOCKER_BASE="${{ env.REGISTRY_DOCKER }}/${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
-            
-            echo "2. 验证 Docker Hub 镜像:"
-            
-            DOCKER_TAGS=(
-              "纯latest标签 (无后缀): ${DOCKER_BASE}:latest"
-              "版本号标签 (无后缀): ${DOCKER_BASE}:${VERSION}"
-              "版本号server变体: ${DOCKER_BASE}:${VERSION}-server"
-              "版本号client变体: ${DOCKER_BASE}:${VERSION}-client"
-              "latest-server标签: ${DOCKER_BASE}:latest-server"
-              "latest-client标签: ${DOCKER_BASE}:latest-client"
-            )
-            
-            for TAG_INFO in "${DOCKER_TAGS[@]}"; do
-              DESCRIPTION="${TAG_INFO%:*}"
-              TAG="${TAG_INFO#*: }"
-              echo -n "   ${DESCRIPTION}: "
-              docker buildx imagetools inspect "$TAG" >/dev/null 2>&1 && echo "✓ 存在" || echo "✗ 不存在"
-            done
-            
-            echo ""
-          else
-            echo "2. Docker Hub 未配置，跳过验证"
-            echo ""
-          fi
+          echo "2. 验证 Docker Hub 镜像:"
           
-          # 测试拉取关键镜像
+          echo "   a) 纯latest标签 (无后缀): ${DOCKER_BASE}:latest"
+          docker manifest inspect "${DOCKER_BASE}:latest" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo "   b) 版本号标签 (无后缀): ${DOCKER_BASE}:${VERSION}"
+          docker manifest inspect "${DOCKER_BASE}:${VERSION}" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo "   c) 版本号server变体: ${DOCKER_BASE}:${VERSION}-server"
+          docker manifest inspect "${DOCKER_BASE}:${VERSION}-server" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo "   d) 版本号client变体: ${DOCKER_BASE}:${VERSION}-client"
+          docker manifest inspect "${DOCKER_BASE}:${VERSION}-client" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo "   e) latest-server标签: ${DOCKER_BASE}:latest-server"
+          docker manifest inspect "${DOCKER_BASE}:latest-server" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo "   f) latest-client标签: ${DOCKER_BASE}:latest-client"
+          docker manifest inspect "${DOCKER_BASE}:latest-client" 2>/dev/null && echo "   ✓ 存在" || echo "   ✗ 不存在"
+          
+          echo ""
+          
+          # 测试拉取镜像
           echo "3. 测试拉取关键镜像:"
-          KEY_TAGS=(
-            "${GHCR_BASE}:latest"
-            "${GHCR_BASE}:${VERSION}"
-            "${GHCR_BASE}:latest-server"
-            "${GHCR_BASE}:latest-client"
-          )
+          echo "   拉取 GHCR 纯latest (无后缀)..."
+          docker pull "${GHCR_BASE}:latest" --quiet 2>/dev/null && echo "   ✓ 成功" || echo "   ✗ 失败"
           
-          for TAG in "${KEY_TAGS[@]}"; do
-            echo -n "   拉取 ${TAG}... "
-            docker pull "$TAG" --quiet 2>/dev/null && echo "✓ 成功" || echo "✗ 失败"
-          done
+          echo "   拉取 GHCR 版本号标签 (无后缀)..."
+          docker pull "${GHCR_BASE}:${VERSION}" --quiet 2>/dev/null && echo "   ✓ 成功" || echo "   ✗ 失败"
+          
+          echo "   拉取 GHCR latest-server..."
+          docker pull "${GHCR_BASE}:latest-server" --quiet 2>/dev/null && echo "   ✓ 成功" || echo "   ✗ 失败"
+          
+          echo "   拉取 GHCR latest-client..."
+          docker pull "${GHCR_BASE}:latest-client" --quiet 2>/dev/null && echo "   ✓ 成功" || echo "   ✗ 失败"
           
           echo ""
           
@@ -446,8 +323,7 @@ jobs:
           echo "   GHCR 版本号client变体:"
           echo "   docker run -d --name anytls-client ${GHCR_BASE}:${VERSION}-client"
           
-          if [ "${{ steps.verify-check-dockerhub.outputs.dockerhub_enabled }}" = "true" ]; then
-            DOCKER_BASE="${{ env.REGISTRY_DOCKER }}/${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
             echo ""
             echo "   Docker Hub 纯latest标签 (server, 无后缀):"
             echo "   docker run -d --name anytls-server ${DOCKER_BASE}:latest"
