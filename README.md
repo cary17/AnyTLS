@@ -1,16 +1,3 @@
-## 项目结构
-
-```
-.
-├── .github/workflows/
-│   └── build.yml
-├── Dockerfile.server
-├── Dockerfile.client
-├── entrypoint-server.sh
-├── entrypoint-client.sh
-└── README.md
-```
-
 ## 快速开始
 
 ### Server
