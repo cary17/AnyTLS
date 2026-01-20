@@ -7,14 +7,12 @@ RUN apt-get update && apt-get install -y curl unzip ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 RUN if [ "$TARGETARCH" = "amd64" ]; then ARCH="amd64"; else ARCH="arm64"; fi && \
-    echo "Downloading for architecture: ${ARCH}, version: ${VERSION}" && \
+    echo "Building for architecture: ${ARCH}" && \
+    echo "Version (without v): ${VERSION}" && \
     URL="https://github.com/anytls/anytls-go/releases/download/v${VERSION}/anytls_${VERSION}_linux_${ARCH}.zip" && \
-    echo "Download URL: ${URL}" && \
+    echo "Downloading from: ${URL}" && \
     curl -fSL -o /tmp/anytls.zip "${URL}" && \
-    ls -lh /tmp/anytls.zip && \
-    unzip -l /tmp/anytls.zip && \
     unzip /tmp/anytls.zip -d /tmp && \
-    ls -lh /tmp/ && \
     chmod +x /tmp/anytls-server && \
     rm /tmp/anytls.zip
 
@@ -34,5 +32,6 @@ USER anytls
 ENV LISTEN_ADDR=0.0.0.0:8443
 ENV PASSWORD=""
 
+EXPOSE 8443
 
 ENTRYPOINT ["/entrypoint.sh"]
